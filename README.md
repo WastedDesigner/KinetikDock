@@ -44,10 +44,10 @@ No SDK needed: `build.bat` compiles `KinetikDock.cs` with the .NET Framework com
 
 `KinetikDock.exe --demo` runs a separate copy with made-up groups that reads and saves no settings. Add `--theme Light` (or any theme name) to pick its theme, and `--shot file.png` to draw the groups into a PNG and quit, which is how the screenshots were made.
 
+## Tests and packaging
+
+`python tests/run-tests.py` runs the regression checks (no window opens). `build.bat package` builds the exe and makes the release zip, checking every file in it against its SHA-256 hash. The shared support code (`SuiteSupport.cs`) is compiled into the exe, so there's no extra DLL.
+
 ## License
 
 [GPL-3.0-or-later](LICENSE). Copyright © 2026 Akila Sella Hennedige.
-
-## Local maintenance build 1.0.1
-
-Includes the approved 16 October 2026 diagnostics fixes. Cross-compilation and regression results are recorded in the Apps diagnostics report; Windows GUI and hardware validation remains pending. Run `python tests/run-tests.py` for non-GUI regressions, and `build.bat package` to compile and create a hash-verified release package. Shared support is compiled into the EXE; no additional runtime DLL is required.
