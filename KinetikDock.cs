@@ -23,12 +23,12 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Kinetik Dock")]
 [assembly: AssemblyProduct("Kinetik Dock")]
 [assembly: AssemblyCopyright("Copyright © 2026 Akila Sella Hennedige")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 static class Program
 {
-    public const string Version = "1.0.0";
+    public const string Version = "1.0.1";
     // --demo: made-up groups, nothing read from or saved to this PC. "--theme Name" picks its theme.
     // "--shot file.png" draws the demo groups into a PNG and quits (for the README screenshots).
     public static bool Demo;
@@ -54,7 +54,9 @@ static class Program
             ToolStripManager.Renderer = new DarkMenu();
             Backup.KeyName = "KinetikDock"; Backup.AppTitle = "Kinetik Dock";
             if (!Demo) Backup.OfferRestore();
-            Application.Run(new DockContext());
+            var app = new DockContext();
+            using (new KinetikSuite.Shutdown("KinetikDock" + (Demo ? "Demo" : ""), app.Quit))
+                Application.Run(app);
         }
         if (!Demo) Backup.AfterExit();
     }
@@ -119,7 +121,16 @@ class Settings
                 "Kinetik Dock", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         try { if (s.Groups != "") s.List = new JavaScriptSerializer().Deserialize<List<GroupData>>(s.Groups) ?? new List<GroupData>(); }
         catch { s.List = new List<GroupData>(); if (s.Groups != "") Unreadable = true; }
-        foreach (var g in s.List) { if (g.Items == null) g.Items = new List<ItemData>(); if (g.Cols < 1) g.Cols = 4; }
+        s.List.RemoveAll(g => g == null);
+        foreach (var g in s.List)
+        {
+            if (g.Items == null) g.Items = new List<ItemData>();
+            g.Items.RemoveAll(item => item == null || string.IsNullOrWhiteSpace(item.Path));
+            foreach (var item in g.Items) if (item.Name == null) item.Name = Target.NameFor(item.Path);
+            g.Cols = Math.Max(1, Math.Min(8, g.Cols));
+            if (g.Name == null) g.Name = "Shortcuts";
+            if (string.IsNullOrEmpty(g.Id)) g.Id = Guid.NewGuid().ToString("N");
+        }
         if (s.List.Count == 0) s.List.Add(new GroupData());
         return s;
     }
@@ -167,16 +178,18 @@ class Settings
                             else if (f.FieldType == typeof(int)) f.SetValue(s, Convert.ToInt32(v));
                             else f.SetValue(s, Convert.ToInt32(v) != 0);
                         }
-                        catch { }
+                        catch { ok = false; }
                     }
         }
         catch { ok = false; }
-        return s;
+        KinetikSuite.SettingsValidation.Sanitize(s); return s;
     }
 
     public void Save()
     {
         if (Program.Demo || Unreadable) return;
+        KinetikSuite.SettingsValidation.Sanitize(this);
+        if (KinetikSuite.RegistryFiles.CannotSave) return;
         try
         {
             Groups = new JavaScriptSerializer().Serialize(List);
@@ -194,6 +207,32 @@ class Settings
 }
 
 // ======================================================================= What an item is, and its icon
+// Shell and filesystem work never runs inside painting. Icon APIs use one STA worker.
+static class DockWork
+{
+    static readonly System.Collections.Concurrent.BlockingCollection<Action> icons = new System.Collections.Concurrent.BlockingCollection<Action>(256);
+    static readonly System.Collections.Concurrent.BlockingCollection<Action> io = new System.Collections.Concurrent.BlockingCollection<Action>(256);
+    static Control ui;
+    static Action changed;
+    public static void Initialize(Action refresh)
+    {
+        changed = refresh; ui = new Control(); var handle = ui.Handle;
+        var iconThread = new Thread(() => Consume(icons)) { IsBackground = true, Name = "Dock icons" };
+        iconThread.SetApartmentState(ApartmentState.STA); iconThread.Start();
+        for (int i = 0; i < 2; i++) new Thread(() => Consume(io)) { IsBackground = true, Name = "Dock paths" }.Start();
+    }
+    static void Consume(System.Collections.Concurrent.BlockingCollection<Action> queue)
+    { foreach (var work in queue.GetConsumingEnumerable()) try { work(); } catch { } }
+    public static bool Queue(Action work, bool icon)
+    { try { return (icon ? icons : io).TryAdd(work); } catch (InvalidOperationException) { return false; } }
+    public static void Publish(Action update, Action abandoned = null)
+    {
+        try { ui.BeginInvoke((Action)(() => { if (ui.IsDisposed) { if (abandoned != null) abandoned(); return; } update(); if (changed != null) changed(); })); }
+        catch { if (abandoned != null) abandoned(); }
+    }
+    public static void Stop() { changed = null; icons.CompleteAdding(); io.CompleteAdding(); if (ui != null) ui.Dispose(); }
+}
+
 static class Target
 {
     static readonly string[] Schemes = { "http:", "https:", "ftp:", "mailto:", "shell:", "ms-settings:", "steam:", "obsidian:", "spotify:" };
@@ -226,15 +265,20 @@ static class Target
 
     // Whether a file or folder is still there, checked at most once a minute per path (network drives can be slow).
     static readonly Dictionary<string, KeyValuePair<DateTime, bool>> seen = new Dictionary<string, KeyValuePair<DateTime, bool>>(StringComparer.OrdinalIgnoreCase);
+    static readonly HashSet<string> pending = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     public static bool Exists(string p)
     {
+        if (string.IsNullOrEmpty(p)) return false;
         if (IsLink(p) || IsShell(p)) return true;
         KeyValuePair<DateTime, bool> v;
-        if (seen.TryGetValue(p, out v) && (DateTime.UtcNow - v.Key).TotalSeconds < 60) return v.Value;
-        bool e;
-        try { e = File.Exists(p) || Directory.Exists(p); } catch { e = false; }
-        seen[p] = new KeyValuePair<DateTime, bool>(DateTime.UtcNow, e);
-        return e;
+        bool known = seen.TryGetValue(p, out v);
+        if (known && (DateTime.UtcNow - v.Key).TotalSeconds < 60) return v.Value;
+        if (pending.Add(p) && !DockWork.Queue(() =>
+        {
+            bool exists = File.Exists(p) || Directory.Exists(p);
+            DockWork.Publish(() => { pending.Remove(p); seen[p] = new KeyValuePair<DateTime, bool>(DateTime.UtcNow, exists); });
+        }, false)) pending.Remove(p);
+        return !known || v.Value;
     }
     public static void Forget(string p) { seen.Remove(p); }
 
@@ -278,17 +322,32 @@ static class ShellIcon
 
     static readonly Dictionary<string, Bitmap> cache = new Dictionary<string, Bitmap>(StringComparer.OrdinalIgnoreCase);
 
+    static readonly HashSet<string> pending = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    static readonly Dictionary<string, DateTime> fetched = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+    static int generation;
     public static Bitmap Get(string path, int px)
     {
+        if (string.IsNullOrEmpty(path)) return null;
         var key = px + "|" + path;
-        Bitmap b;
-        if (cache.TryGetValue(key, out b)) return b;
-        b = Load(path, px);
-        cache[key] = b; // a failure is remembered too (null), until Clear
-        return b;
+        Bitmap bitmap; DateTime at;
+        bool known = cache.TryGetValue(key, out bitmap);
+        if (known && bitmap != null) return bitmap;
+        if (known && fetched.TryGetValue(key, out at) && (DateTime.UtcNow - at).TotalSeconds < 60) return null;
+        int gen = generation;
+        if (pending.Add(key) && !DockWork.Queue(() =>
+        {
+            var loaded = Load(path, px);
+            DockWork.Publish(() =>
+            {
+                if (gen != generation) { if (loaded != null) loaded.Dispose(); return; }
+                pending.Remove(key); fetched[key] = DateTime.UtcNow; cache[key] = loaded;
+            }, () => { if (loaded != null) loaded.Dispose(); });
+        }, true)) pending.Remove(key);
+        return bitmap;
     }
 
-    public static void Clear() { foreach (var b in cache.Values) if (b != null) b.Dispose(); cache.Clear(); }
+    public static void Clear()
+    { generation++; foreach (var b in cache.Values) if (b != null) b.Dispose(); cache.Clear(); fetched.Clear(); pending.Clear(); }
 
     static Bitmap Load(string path, int px)
     {
@@ -327,12 +386,13 @@ class DockContext : ApplicationContext
 {
     public readonly Settings C = Settings.Load();
     readonly NotifyIcon tray = new NotifyIcon();
-    readonly ContextMenuStrip menu = new ContextMenuStrip();
+    readonly ContextMenuStrip menu = KinetikSuite.MenuFocus.Attach(new ContextMenuStrip());
     public readonly List<GroupForm> Forms = new List<GroupForm>();
     ThemePicker picker;
 
     public DockContext()
     {
+        DockWork.Initialize(RenderAll);
         try { tray.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { tray.Icon = SystemIcons.Application; }
         tray.Text = Program.Demo ? "Kinetik Dock (demo)" : "Kinetik Dock";
         tray.ContextMenuStrip = menu;
@@ -349,7 +409,7 @@ class DockContext : ApplicationContext
         }
     }
 
-    void OnDisplay(object s, EventArgs e) { try { foreach (var f in Forms) f.Render(); } catch { } }
+    void OnDisplay(object s, EventArgs e) { DockWork.Publish(() => { foreach (var f in Forms.ToList()) f.Render(); }); }
 
     GroupForm Open(GroupData g)
     {
@@ -480,7 +540,7 @@ class DockContext : ApplicationContext
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { tray.Dispose(); menu.Dispose(); ShellIcon.Clear(); }
+        if (disposing) { DockWork.Stop(); tray.Dispose(); menu.Dispose(); ShellIcon.Clear(); }
         base.Dispose(disposing);
     }
 }
@@ -495,7 +555,7 @@ class GroupForm : Form
     public readonly GroupData Data;
     readonly DockContext app;
     readonly DibSurface surface = new DibSurface();
-    readonly ContextMenuStrip menu = new ContextMenuStrip();
+    readonly ContextMenuStrip menu = KinetikSuite.MenuFocus.Attach(new ContextMenuStrip());
     int layer, winW, winH, margin;
     float u = 1;
     bool dragging, moved, dropHot;
@@ -811,7 +871,7 @@ class GroupForm : Form
         return f;
     }
 
-    void DisposeFonts() { foreach (var f in fonts.Values) f.Dispose(); fonts.Clear(); fontKey = null; }
+    void DisposeFonts() { KinetikSuite.Resources.DisposeValues(fonts); fontKey = null; }
 
     static readonly StringFormat fmtL = new StringFormat { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
     static readonly StringFormat fmtR = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap };
@@ -983,7 +1043,7 @@ class GroupForm : Form
     ContextMenuStrip ItemMenu(int index)
     {
         if (itemMenu != null) itemMenu.Dispose();
-        itemMenu = new ContextMenuStrip();
+        itemMenu = KinetikSuite.MenuFocus.Attach(new ContextMenuStrip());
         var it = Data.Items[index];
         itemMenu.Items.Add(Item("Open", false, () => Target.Open(it.Path)));
         if (!Target.IsLink(it.Path) && !Target.IsShell(it.Path)) itemMenu.Items.Add(Item("Show in File Explorer", false, () => Target.Reveal(it.Path)));
@@ -1461,22 +1521,8 @@ static class Backup
         }
     }
 
-    static bool Reg(string args)
-    {
-        try
-        {
-            var psi = new System.Diagnostics.ProcessStartInfo(System.IO.Path.Combine(Environment.SystemDirectory, "reg.exe"), args)
-            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-            using (var p = System.Diagnostics.Process.Start(psi))
-            {
-                p.StandardOutput.ReadToEnd(); p.StandardError.ReadToEnd();
-                return p.WaitForExit(15000) && p.ExitCode == 0;
-            }
-        }
-        catch { return false; }
-    }
+    static bool Reg(string args) { return KinetikSuite.RegistryFiles.Run(args); }
 
-    // A restore may only write this app's own key, so an edited or swapped file can't change anything else.
     static bool FileIsOurs()
     {
         try
@@ -1495,7 +1541,11 @@ static class Backup
         catch { return false; }
     }
 
-    static bool Import() { return FileIsOurs() && Reg("import \"" + FilePath + "\""); }
+    static bool Import()
+    {
+        try { return FileIsOurs() && KinetikSuite.RegistryFiles.Replace(FilePath, new[] { KeyName }); }
+        catch (Exception ex) { Say(ex.Message, MessageBoxIcon.Warning); return false; }
+    }
 
     static void Say(string text, MessageBoxIcon icon) { MessageBox.Show(text, AppTitle, MessageBoxButtons.OK, icon); }
 
