@@ -15,6 +15,29 @@ It's a small portable app with no installer and no account.
 
 ## Features
 
+### New in 1.2: desktop organisation and lower rendering costs
+
+![Kinetik Dock 1.2 with tabbed groups, a folder portal and compact shortcuts](screenshots/features-1.2.png)
+
+- **Resize and scroll:** drag a group's edges or corners; columns adapt to its width. Large groups draw only their visible rows. Use the wheel or scrollbar to browse.
+- **Folder portals:** right-click a group or the tray → **New folder portal** to browse a live folder. Open subfolders, go up/home/back/forward, filter files and sort by name, type, modified date or size. Original files stay in place.
+- **Tabs:** right-click a group → **Tabs → Combine with**. Switch using the tab strip; use its overflow menu for more tabs, or detach a tab from its menu.
+- **Workspaces:** create and select named layouts from the **Workspaces** menu; move individual groups with **Move to workspace**.
+- **Quick access:** **Ctrl+Alt+Space** temporarily raises your current groups above other windows. Press it again or **Escape** to restore their normal layer.
+- **Instant shortcut search:** **Ctrl+Alt+F** searches saved references across workspaces and currently loaded portal contents. Type, choose a result and press Enter.
+- **Multiple items:** Ctrl-click to toggle selection, Shift-click to select a range, then drag the selection. Hold Ctrl during an internal drop to copy references. Selected items also have bulk move/remove menu actions.
+- **Keyboard access:** right-click → **Select items with keyboard**. Use arrows, Shift, Ctrl+A, Enter, F2, Delete, Ctrl+Z/Y and Escape. Delete removes Dock references only; portal files cannot be deleted from this view. Shortcut names, paths and actions are exposed to accessibility tools.
+- **Desktop organisation:** **Organise desktop references** previews filename rules and destinations. Add only checked matches, and optionally watch for new desktop items. Rules use `*`, `?`, `;` and `<folders>`; the first match wins. This feature adds references and does not move or hide original desktop files.
+- **Undo and snapshots:** use **Layout and history** for undo/redo, collapse/expand all and JSON export/import. Import adds groups; undo can revert the import. Undo history is kept in memory for the current session.
+- **Personalise each group:** compact spacing, list view, icon size, labels, accent colour and individual locking. **Settings and diagnostics** includes searchable behaviour settings, a lightweight appearance option and resource counters.
+- **Less repeated work:** affected-group redraws, merged updates, bounded icon/existence caches, delayed settings saves, background shell launches and watcher/surface cleanup for inactive groups.
+
+Portals show up to 5,000 matching items per folder; use Explorer for larger collections. New keyboard shortcuts can be disabled in Settings if another app uses them. The tray menu provides the same actions. Portal copy/move/delete operations, native desktop icon management and Windows virtual-desktop binding remain future work.
+
+The controlled 1,000-item rendering benchmark and its limits are documented in [PERFORMANCE_1.2.md](PERFORMANCE_1.2.md). The broader candidate backlog and release coverage are in [FEATURE_AND_OPTIMISATION_PLAN.md](FEATURE_AND_OPTIMISATION_PLAN.md).
+
+### Existing features
+
 - **Any number of groups**, each with its own name, number of columns and place on screen
 - **Drop to add:** drag apps, shortcuts, files or folders from File Explorer, or a link from your browser's address bar, onto a group
 - **Click to open**; right-click a shortcut to show it in File Explorer, rename it, change what it opens, or move it to another group
@@ -40,13 +63,15 @@ Windows 10 or 11 (64-bit) with .NET Framework 4.8, which ships with both.
 
 ## Building from source
 
-No SDK needed: `build.bat` compiles `KinetikDock.cs` with the .NET Framework compiler that ships with Windows. `build.bat package` also makes `KinetikDock.zip` for a release.
+No SDK needed: `build.bat` compiles `KinetikDock.cs`, `DockFeatures.cs`, `DesktopOrganisation.cs` and `SuiteSupport.cs` with the .NET Framework compiler that ships with Windows. `build.bat package` also makes `KinetikDock.zip` for a release.
 
 `KinetikDock.exe --demo` runs a separate copy with made-up groups that reads and saves no settings. Add `--theme Light` (or any theme name) to pick its theme, and `--shot file.png` to draw the groups into a PNG and quit, which is how the screenshots were made.
 
 ## Tests and packaging
 
 `python tests/run-tests.py` runs the regression checks (no window opens). `build.bat package` builds the exe and makes the release zip, checking every file in it against its SHA-256 hash. The shared support code (`SuiteSupport.cs`) is compiled into the exe, so there's no extra DLL.
+
+`powershell -File tests/run-dock-tests.ps1` runs the Dock integration checks in isolated demo mode with temporary fixtures; it briefly creates test group windows and never reads or saves your Dock layout. `powershell -File tests/run-benchmark.ps1` runs the repeatable 1,000-shortcut rendering benchmark. `tests/measure-idle.ps1 -Exe <absolute-exe-path>` measures the default demo after settling.
 
 ## License
 

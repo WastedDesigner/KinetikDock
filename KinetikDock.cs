@@ -23,12 +23,12 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Kinetik Dock")]
 [assembly: AssemblyProduct("Kinetik Dock")]
 [assembly: AssemblyCopyright("Copyright © 2026 Akila Sella Hennedige")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 static class Program
 {
-    public const string Version = "1.1.0";
+    public const string Version = "1.2.0";
     // --demo: made-up groups, nothing read from or saved to this PC. "--theme Name" picks its theme.
     // "--shot file.png" draws the demo groups into a PNG and quits (for the README screenshots).
     public static bool Demo;
@@ -47,7 +47,7 @@ static class Program
         using (new Mutex(true, Demo ? @"Local\KinetikDockDemo" + (ShotPath != null ? Guid.NewGuid().ToString("N") : "") : @"Local\KinetikDock", out created))
         {
             if (!created) return; // already running
-            SetProcessDPIAware();
+            try { if (!SetProcessDpiAwarenessContext(new IntPtr(-4))) SetProcessDPIAware(); } catch (EntryPointNotFoundException) { SetProcessDPIAware(); }
             Application.OleRequired();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -60,13 +60,18 @@ static class Program
         }
         if (!Demo) Backup.AfterExit();
     }
+    [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
 }
 
 // ======================================================================= Settings
 public class ItemData
 {
+    public string Id { get; set; }
     public string Name { get; set; }
     public string Path { get; set; }
+    public bool IsDirectory { get; set; }
+    [ScriptIgnore] public long SortValue { get; set; }
+    public ItemData() { Id = Guid.NewGuid().ToString("N"); }
 }
 
 public class GroupData
@@ -77,8 +82,23 @@ public class GroupData
     public int Y { get; set; }
     public int Cols { get; set; }
     public bool Collapsed { get; set; }
+    public bool Locked { get; set; }
+    public int Width { get; set; }
+    public int Height { get; set; }
+    public int ItemSize { get; set; }
+    public int LabelMode { get; set; }
+    public int AccentArgb { get; set; }
+    public bool Compact { get; set; }
+    public bool ListView { get; set; }
+    public string Workspace { get; set; }
+    public string TabSet { get; set; }
+    public string PortalPath { get; set; }
+    public string PortalFilter { get; set; }
+    public int PortalSort { get; set; }
+    public bool PortalDescending { get; set; }
+    public bool ShowHidden { get; set; }
     public List<ItemData> Items { get; set; }
-    public GroupData() { Id = Guid.NewGuid().ToString("N").Substring(0, 8); Name = "Shortcuts"; X = int.MinValue; Y = int.MinValue; Cols = 4; Items = new List<ItemData>(); }
+    public GroupData() { Id = Guid.NewGuid().ToString("N"); Name = "Shortcuts"; X = int.MinValue; Y = int.MinValue; Cols = 4; ItemSize = -1; LabelMode = -1; Workspace = "Main"; Items = new List<ItemData>(); }
 }
 
 class Settings
@@ -86,6 +106,10 @@ class Settings
     const string KeyPath = @"Software\KinetikDock";
     public int Scale = 100, Opacity = CommonMenu.DefaultOpacity, Layer = 0, IconSize = 1; // IconSize: 0 small, 1 normal, 2 large
     public bool Locked, Snap = true, Labels = true;
+    public bool Lightweight, Hotkeys = true, DoubleClickOpen;
+    public string Workspace = "Main";
+    public bool AutoOrganise;
+    public string RulesJson = "", DesktopSeenJson = "[]", AutomationWorkspace = "Main";
     public string ThemeName = "Midnight", FontName = "";
     public string Groups = "";  // the groups as JSON
 
@@ -119,7 +143,7 @@ class Settings
                 "Your settings haven't been changed, and nothing will be saved over them while this is showing. " +
                 "Restart Kinetik Dock to try again" + (Backup.Exists ? ", or use right-click → Backup → Restore settings…" : "."),
                 "Kinetik Dock", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        try { if (s.Groups != "") s.List = new JavaScriptSerializer().Deserialize<List<GroupData>>(s.Groups) ?? new List<GroupData>(); }
+        try { if (s.Groups != "") s.List = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 }.Deserialize<List<GroupData>>(s.Groups) ?? new List<GroupData>(); }
         catch { s.List = new List<GroupData>(); if (s.Groups != "") Unreadable = true; }
         s.List.RemoveAll(g => g == null);
         foreach (var g in s.List)
@@ -130,6 +154,7 @@ class Settings
             g.Cols = Math.Max(1, Math.Min(8, g.Cols));
             if (g.Name == null) g.Name = "Shortcuts";
             if (string.IsNullOrEmpty(g.Id)) g.Id = Guid.NewGuid().ToString("N");
+            DockLayout.Sanitize(g);
         }
         if (s.List.Count == 0) s.List.Add(new GroupData());
         return s;
@@ -185,24 +210,26 @@ class Settings
         KinetikSuite.SettingsValidation.Sanitize(s); return s;
     }
 
-    public void Save()
+    public static string LastSaveError;
+    public bool Save()
     {
-        if (Program.Demo || Unreadable) return;
+        if (Program.Demo) return true;
+        if (Unreadable) return false;
         KinetikSuite.SettingsValidation.Sanitize(this);
-        if (KinetikSuite.RegistryFiles.CannotSave) return;
+        if (KinetikSuite.RegistryFiles.CannotSave) return false;
         try
         {
-            Groups = new JavaScriptSerializer().Serialize(List);
+            Groups = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 }.Serialize(List);
             using (var k = Registry.CurrentUser.CreateSubKey(KeyPath))
                 foreach (var f in Fields)
                 {
                     var v = f.GetValue(this);
-                    if (f.FieldType == typeof(bool)) k.SetValue(f.Name, (bool)v ? 1 : 0);
-                    else if (f.FieldType == typeof(int)) k.SetValue(f.Name, (int)v);
-                    else k.SetValue(f.Name, (string)v ?? "");
+                    object desired = f.FieldType == typeof(bool) ? (object)((bool)v ? 1 : 0) : v ?? "";
+                    if (!object.Equals(k.GetValue(f.Name), desired)) k.SetValue(f.Name, desired);
                 }
+            LastSaveError = null; return true;
         }
-        catch { }
+        catch (Exception ex) { LastSaveError = ex.Message; return false; }
     }
 }
 
@@ -212,9 +239,11 @@ static class DockWork
 {
     static readonly System.Collections.Concurrent.BlockingCollection<Action> icons = new System.Collections.Concurrent.BlockingCollection<Action>(256);
     static readonly System.Collections.Concurrent.BlockingCollection<Action> io = new System.Collections.Concurrent.BlockingCollection<Action>(256);
+    static readonly System.Collections.Concurrent.BlockingCollection<Action> launches = new System.Collections.Concurrent.BlockingCollection<Action>(32);
+    static bool launchStarted;
     static Control ui;
-    static Action changed;
-    public static void Initialize(Action refresh)
+    static Action<string> changed;
+    public static void Initialize(Action<string> refresh)
     {
         changed = refresh; ui = new Control(); var handle = ui.Handle;
         var iconThread = new Thread(() => Consume(icons)) { IsBackground = true, Name = "Dock icons" };
@@ -225,12 +254,22 @@ static class DockWork
     { foreach (var work in queue.GetConsumingEnumerable()) try { work(); } catch { } }
     public static bool Queue(Action work, bool icon)
     { try { return (icon ? icons : io).TryAdd(work); } catch (InvalidOperationException) { return false; } }
-    public static void Publish(Action update, Action abandoned = null)
+    public static void Launch(Action work)
     {
-        try { ui.BeginInvoke((Action)(() => { if (ui.IsDisposed) { if (abandoned != null) abandoned(); return; } update(); if (changed != null) changed(); })); }
+        if (!launchStarted)
+        {
+            launchStarted = true;
+            var thread = new Thread(() => Consume(launches)) { IsBackground = true, Name = "Dock launcher" };
+            thread.SetApartmentState(ApartmentState.STA); thread.Start();
+        }
+        try { if (!launches.TryAdd(work)) MessageBox.Show("Several launches are still pending. Try again in a moment.", "Kinetik Dock"); } catch (InvalidOperationException) { }
+    }
+    public static void Publish(Action update, Action abandoned = null, string path = null)
+    {
+        try { ui.BeginInvoke((Action)(() => { if (ui.IsDisposed) { if (abandoned != null) abandoned(); return; } update(); if (changed != null && path != null) changed(path); })); }
         catch { if (abandoned != null) abandoned(); }
     }
-    public static void Stop() { changed = null; icons.CompleteAdding(); io.CompleteAdding(); if (ui != null) ui.Dispose(); }
+    public static void Stop() { changed = null; icons.CompleteAdding(); io.CompleteAdding(); launches.CompleteAdding(); if (ui != null) ui.Dispose(); }
 }
 
 static class Target
@@ -266,6 +305,7 @@ static class Target
     // Whether a file or folder is still there, checked at most once a minute per path (network drives can be slow).
     static readonly Dictionary<string, KeyValuePair<DateTime, bool>> seen = new Dictionary<string, KeyValuePair<DateTime, bool>>(StringComparer.OrdinalIgnoreCase);
     static readonly HashSet<string> pending = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    public static readonly HashSet<string> RetryWanted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     public static bool Exists(string p)
     {
         if (string.IsNullOrEmpty(p)) return false;
@@ -276,31 +316,38 @@ static class Target
         if (pending.Add(p) && !DockWork.Queue(() =>
         {
             bool exists = File.Exists(p) || Directory.Exists(p);
-            DockWork.Publish(() => { pending.Remove(p); seen[p] = new KeyValuePair<DateTime, bool>(DateTime.UtcNow, exists); });
-        }, false)) pending.Remove(p);
+            DockWork.Publish(() => { pending.Remove(p); seen[p] = new KeyValuePair<DateTime, bool>(DateTime.UtcNow, exists); if (seen.Count > 4096) seen.Remove(seen.OrderBy(k => k.Value.Key).First().Key); }, null, p);
+        }, false)) { pending.Remove(p); RetryWanted.Add(p); }
+        else if (pending.Contains(p)) RetryWanted.Remove(p);
         return !known || v.Value;
     }
     public static void Forget(string p) { seen.Remove(p); }
 
     public static void Open(string p)
     {
+        DockWork.Launch(() =>
+        {
         try
         {
             var psi = new ProcessStartInfo(p) { UseShellExecute = true };
-            if (!IsLink(p) && !IsShell(p) && File.Exists(p)) psi.WorkingDirectory = System.IO.Path.GetDirectoryName(p);
+            // Let the shell resolve the target; synchronous existence probes can stall on offline shares.
+            if (!IsLink(p) && !IsShell(p) && Path.IsPathRooted(p)) psi.WorkingDirectory = Path.GetDirectoryName(p) ?? "";
             Process.Start(psi);
         }
-        catch (Exception ex) { MessageBox.Show("Couldn't open " + p + "\n\n" + ex.Message, "Kinetik Dock", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+        catch (Exception ex) { DockWork.Publish(() => MessageBox.Show("Couldn't open " + p + "\n\n" + ex.Message, "Kinetik Dock", MessageBoxButtons.OK, MessageBoxIcon.Warning)); }
+        });
     }
 
     public static void Reveal(string p)
     {
+        DockWork.Launch(() =>
+        {
         try
         {
-            if (Directory.Exists(p)) Process.Start("explorer.exe", "\"" + p + "\"");
-            else Process.Start("explorer.exe", "/select,\"" + p + "\"");
+            Process.Start("explorer.exe", "/select,\"" + p + "\"");
         }
         catch { }
+        });
     }
 }
 
@@ -324,6 +371,10 @@ static class ShellIcon
 
     static readonly HashSet<string> pending = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     static readonly Dictionary<string, DateTime> fetched = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+    public static readonly HashSet<string> RetryWanted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    static readonly Dictionary<string, long> used = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+    public static long Bytes;
+    public static int Count { get { return cache.Count; } }
     static int generation;
     public static Bitmap Get(string path, int px)
     {
@@ -331,7 +382,7 @@ static class ShellIcon
         var key = px + "|" + path;
         Bitmap bitmap; DateTime at;
         bool known = cache.TryGetValue(key, out bitmap);
-        if (known && bitmap != null) return bitmap;
+        if (known && bitmap != null) { used[key] = Stopwatch.GetTimestamp(); return bitmap; }
         if (known && fetched.TryGetValue(key, out at) && (DateTime.UtcNow - at).TotalSeconds < 60) return null;
         int gen = generation;
         if (pending.Add(key) && !DockWork.Queue(() =>
@@ -340,14 +391,23 @@ static class ShellIcon
             DockWork.Publish(() =>
             {
                 if (gen != generation) { if (loaded != null) loaded.Dispose(); return; }
-                pending.Remove(key); fetched[key] = DateTime.UtcNow; cache[key] = loaded;
-            }, () => { if (loaded != null) loaded.Dispose(); });
-        }, true)) pending.Remove(key);
+                pending.Remove(key); fetched[key] = DateTime.UtcNow; cache[key] = loaded; used[key] = Stopwatch.GetTimestamp();
+                if (loaded != null) Bytes += (long)loaded.Width * loaded.Height * 4;
+                while (Bytes > 24 * 1024 * 1024 || cache.Count > 2048)
+                {
+                    var victim = used.OrderBy(k => k.Value).First().Key;
+                    var old = cache[victim];
+                    if (old != null) { Bytes -= (long)old.Width * old.Height * 4; old.Dispose(); }
+                    cache.Remove(victim); fetched.Remove(victim); used.Remove(victim);
+                }
+            }, () => { if (loaded != null) loaded.Dispose(); }, path);
+        }, true)) { pending.Remove(key); RetryWanted.Add(key); }
+        else if (pending.Contains(key)) RetryWanted.Remove(key);
         return bitmap;
     }
 
     public static void Clear()
-    { generation++; foreach (var b in cache.Values) if (b != null) b.Dispose(); cache.Clear(); fetched.Clear(); pending.Clear(); }
+    { generation++; foreach (var b in cache.Values) if (b != null) b.Dispose(); cache.Clear(); fetched.Clear(); pending.Clear(); used.Clear(); RetryWanted.Clear(); Bytes = 0; }
 
     static Bitmap Load(string path, int px)
     {
@@ -382,7 +442,7 @@ static class ShellIcon
 }
 
 // ======================================================================= The app: a tray icon and a window per group
-class DockContext : ApplicationContext
+partial class DockContext : ApplicationContext
 {
     public readonly Settings C = Settings.Load();
     readonly NotifyIcon tray = new NotifyIcon();
@@ -392,7 +452,8 @@ class DockContext : ApplicationContext
 
     public DockContext()
     {
-        DockWork.Initialize(RenderAll);
+        DockWork.Initialize(RefreshPath);
+        InitializeFeatures();
         try { tray.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { tray.Icon = SystemIcons.Application; }
         tray.Text = Program.Demo ? "Kinetik Dock (demo)" : "Kinetik Dock";
         tray.ContextMenuStrip = menu;
@@ -439,14 +500,14 @@ class DockContext : ApplicationContext
         Quit();
     }
 
-    public void Save() { C.Save(); }
+    public void Save() { QueueSave(); }
     public void RenderAll() { foreach (var f in Forms.ToList()) f.Render(); }
 
     public void NewGroup(Point at)
     {
         var name = GroupForm.Prompt("New group", "Name of the group:", "Shortcuts");
         if (name == null) return;
-        var g = new GroupData { Name = name.Trim() == "" ? "Shortcuts" : name.Trim(), X = at.X, Y = at.Y };
+        var g = new GroupData { Name = name.Trim() == "" ? "Shortcuts" : name.Trim(), X = at.X, Y = at.Y, Workspace = C.Workspace };
         C.List.Add(g);
         Save();
         Open(g);
@@ -460,6 +521,7 @@ class DockContext : ApplicationContext
         if (C.List.Count == 0) { var g = new GroupData(); C.List.Add(g); Save(); f.Close(); Open(g); return; }
         Save();
         f.Close();
+        RenderAll();
     }
 
     public void SetLayer(int l)
@@ -470,6 +532,8 @@ class DockContext : ApplicationContext
 
     public void Quit()
     {
+        FlushSave();
+        CloseFeatures();
         tray.Visible = false;
         SystemEvents.DisplaySettingsChanged -= OnDisplay;
         foreach (var f in Forms.ToList()) f.Close();
@@ -504,7 +568,7 @@ class DockContext : ApplicationContext
             Locked = () => C.Locked, SetLocked = v => { C.Locked = v; Changed(); }, LockText = "Lock all groups in place",
             Snap = () => C.Snap, SetSnap = v => { C.Snap = v; Changed(); },
             RunAtStartup = () => Startup.IsOn, SetRunAtStartup = Startup.Set,
-            BackUp = () => { Save(); Backup.SaveNow(); }, Restore = Backup.RestoreNow, LastBackup = () => Backup.SavedText,
+            BackUp = () => { FlushSave(); Backup.SaveNow(); }, Restore = Backup.RestoreNow, LastBackup = () => Backup.SavedText,
             Exit = Quit,
         };
     }
@@ -529,6 +593,7 @@ class DockContext : ApplicationContext
         }
 
         var icons = new ToolStripMenuItem("Icons");
+        AddFeatureMenu(items);
         string[] sizes = { "Small", "Normal", "Large" };
         for (int i = 0; i < 3; i++) { int v = i; icons.DropDownItems.Add(Item(sizes[i], C.IconSize == v, () => { C.IconSize = v; Changed(); })); }
         icons.DropDownItems.Add(new ToolStripSeparator());
@@ -540,13 +605,13 @@ class DockContext : ApplicationContext
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { DockWork.Stop(); tray.Dispose(); menu.Dispose(); ShellIcon.Clear(); }
+        if (disposing) { CloseFeatures(); DockWork.Stop(); tray.Dispose(); menu.Dispose(); ShellIcon.Clear(); }
         base.Dispose(disposing);
     }
 }
 
 // ======================================================================= One group on the desktop
-class GroupForm : Form
+partial class GroupForm : Form
 {
     [StructLayout(LayoutKind.Sequential)] struct WINDOWPOS { public IntPtr hwnd, hwndInsertAfter; public int x, y, cx, cy; public uint flags; }
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
@@ -570,7 +635,7 @@ class GroupForm : Form
     Settings C { get { return app.C; } }
     public Bitmap Frame { get { return surface.Current; } }
     // where the window is (its frame includes the shadow margin round the card)
-    public Rectangle Placed { get { return new Rectangle(Data.X, Data.Y, winW, winH); } }
+    public Rectangle Placed { get { return new Rectangle(renderX, renderY, winW, winH); } }
 
     public GroupForm(DockContext app, GroupData data)
     {
@@ -581,6 +646,7 @@ class GroupForm : Form
         StartPosition = FormStartPosition.Manual;
         Text = "Kinetik Dock: " + data.Name;
         AllowDrop = true;
+        if (!string.IsNullOrWhiteSpace(data.PortalPath)) portal = new FolderPortal(this, data.PortalPath);
         menu.Opening += (s, e) => BuildMenu();
     }
 
@@ -600,15 +666,16 @@ class GroupForm : Form
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == 0x21) { m.Result = (IntPtr)3; return; } // WM_MOUSEACTIVATE → MA_NOACTIVATE
-        if (m.Msg == 0x46 && layer == 0)
+        if (m.Msg == 0x46 && layer == 0 && !app.Peeking)
         {
             var wp = (WINDOWPOS)Marshal.PtrToStructure(m.LParam, typeof(WINDOWPOS));
             if ((wp.flags & 0x4) == 0) { wp.hwndInsertAfter = new IntPtr(1); Marshal.StructureToPtr(wp, m.LParam, false); }
         }
         base.WndProc(ref m);
+        if (m.Msg == 0x2E0) { currentDpi = (int)m.WParam & 0xffff; app.RequestRender(this); }
     }
 
-    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Render(); }
+    protected override void OnHandleCreated(EventArgs e) { surfaceVisible = false; appliedLayer = -1; currentDpi = 0; base.OnHandleCreated(e); Render(); }
 
     protected override void SetVisibleCore(bool value)
     {
@@ -620,6 +687,7 @@ class GroupForm : Form
     protected override void Dispose(bool disposing)
     {
         surface.Dispose();
+        if (disposing) { if (portal != null) portal.Dispose(); if (itemMenu != null) itemMenu.Dispose(); tip.Dispose(); }
         if (disposing) { menu.Dispose(); DisposeFonts(); shadow.Dispose(); if (textLayer != null) textLayer.Dispose(); }
         base.Dispose(disposing);
     }
@@ -628,84 +696,95 @@ class GroupForm : Form
 
     public void Bring()
     {
+        if (Data.Workspace != C.Workspace) app.SelectWorkspace(Data.Workspace);
+        app.SwitchTab(this);
         if (Data.Collapsed) { Data.Collapsed = false; app.Save(); }
         Render();
         SetWindowPos(Handle, new IntPtr(0), 0, 0, 0, 0, 0x1 | 0x2 | 0x10);
     }
 
     // ---- sizes
-    int IconPx { get { return (int)((C.IconSize == 0 ? 24 : C.IconSize == 2 ? 48 : 32) * u); } }
-    float TileW { get { return (C.IconSize == 0 ? 64 : C.IconSize == 2 ? 92 : 76) * u; } }
-    float TileH { get { return IconPx + (C.Labels ? 50 : 18) * u; } }
+    int IconPx { get { return (int)((ItemSize == 0 ? 24 : ItemSize == 2 ? 48 : 32) * u); } }
+    float TileW { get { return (Data.Compact ? 0.84f : 1f) * (ItemSize == 0 ? 64 : ItemSize == 2 ? 92 : 76) * u; } }
+    float TileH { get { return Data.ListView ? Math.Max(32 * u, IconPx + 8 * u) : IconPx + (ShowLabels ? (Data.Compact ? 38 : 50) : 18) * u; } }
     const float HeaderH = 28;
 
     // ---- mouse
-    int TileAt(Point p) { for (int i = 0; i < tiles.Count; i++) if (tiles[i].Contains(p)) return i; return -1; }
+    int TileAt(Point p) { if (!contentArea.Contains(p) || Data.Collapsed) return -1; for (int i = 0; i < tiles.Count && i < tileIndices.Count; i++) if (tiles[i].Contains(p)) return tileIndices[i]; return -1; }
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
+        if (e.Button == MouseButtons.Left && FeatureMouseDown(e.Location)) return;
         if (e.Button == MouseButtons.Left)
         {
             downAt = Cursor.Position; moved = false;
             downTile = TileAt(e.Location);
             downOnHeader = header.Contains(e.Location);
-            if (!C.Locked && downTile < 0) { dragging = true; grab = new Point(Cursor.Position.X - Data.X, Cursor.Position.Y - Data.Y); }
+            if (downTile >= 0 && SelectionMouseDown(downTile)) return;
+            if (!C.Locked && !Data.Locked && downOnHeader) { PrepareSnap(); dragging = true; Capture = true; grab = new Point(Cursor.Position.X - renderX, Cursor.Position.Y - renderY); }
         }
         base.OnMouseDown(e);
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
+        if (FeatureMouseMove(e.Location)) return;
         bool far = Math.Abs(Cursor.Position.X - downAt.X) + Math.Abs(Cursor.Position.Y - downAt.Y) > 4;
         if (dragging && (moved || far))
         {
             moved = true;
             var p = Snap(new Point(Cursor.Position.X - grab.X, Cursor.Position.Y - grab.Y));
             Data.X = p.X; Data.Y = p.Y;
+            renderX = p.X; renderY = p.Y;
+            app.SyncPlacement(this);
             SetWindowPos(Handle, IntPtr.Zero, p.X, p.Y, 0, 0, 0x1 | 0x4 | 0x10);
             Cursor = Cursors.SizeAll;
         }
-        else if (e.Button == MouseButtons.Left && downTile >= 0 && far && downTile < Data.Items.Count)
+        else if (portal == null && e.Button == MouseButtons.Left && downTile >= 0 && far && downTile < Items.Count)
         {
             // drag a shortcut: to rearrange it, move it to another group, or drop it anywhere that takes files
             int from = downTile;
             downTile = -1;
-            var item = Data.Items[from];
+            var item = Items[from];
             var obj = new DataObject();
-            obj.SetData(ItemFormat, Data.Id + "|" + from);
-            if (!Target.IsLink(item.Path) && Target.Exists(item.Path)) obj.SetFileDropList(new StringCollection { item.Path });
-            else obj.SetText(item.Path);
+            var bundle = selected.Contains(item.Id) ? Items.Where(i => selected.Contains(i.Id)).ToList() : new List<ItemData> { item };
+            obj.SetData(ItemFormat, Data.Id + "|" + string.Join(",", bundle.Select(i => i.Id)));
+            var files = new StringCollection(); files.AddRange(bundle.Where(i => !Target.IsLink(i.Path) && !Target.IsShell(i.Path)).Select(i => i.Path).ToArray());
+            if (files.Count > 0) obj.SetFileDropList(files);
+            obj.SetText(string.Join(Environment.NewLine, bundle.Select(i => i.Path)));
             DoDragDrop(obj, DragDropEffects.Move | DragDropEffects.Copy | DragDropEffects.Link);
         }
         else if (!dragging)
         {
             int t = TileAt(e.Location);
-            if (t != hoverTile) { hoverTile = t; Cursor = t >= 0 ? Cursors.Hand : Cursors.Default; Render(); }
+            if (t != hoverTile) { hoverTile = t; Cursor = t >= 0 ? Cursors.Hand : Cursors.Default; app.RequestRender(this); }
         }
         base.OnMouseMove(e);
     }
 
     protected override void OnMouseLeave(EventArgs e)
     {
-        if (hoverTile >= 0) { hoverTile = -1; Render(); }
+        if (hoverTile >= 0) { hoverTile = -1; app.RequestRender(this); }
         base.OnMouseLeave(e);
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
+        if (FeatureMouseUp()) return;
         if (e.Button == MouseButtons.Left)
         {
             bool wasMove = dragging && moved;
             if (wasMove) app.Save();
             dragging = false;
+            Capture = false;
             Cursor = Cursors.Default;
-            if (!wasMove && downTile >= 0 && downTile == TileAt(e.Location) && downTile < Data.Items.Count) Target.Open(Data.Items[downTile].Path);
+            if (!C.DoubleClickOpen && !wasMove && downTile >= 0 && downTile == TileAt(e.Location) && downTile < Items.Count) OpenItem(Items[downTile]);
             downTile = -1;
         }
         else if (e.Button == MouseButtons.Right)
         {
             int t = TileAt(e.Location);
-            if (t >= 0 && t < Data.Items.Count) ItemMenu(t).Show(Cursor.Position);
+            if (t >= 0 && t < Items.Count) ItemMenu(t).Show(Cursor.Position);
             else menu.Show(Cursor.Position);
         }
         base.OnMouseUp(e);
@@ -713,7 +792,9 @@ class GroupForm : Form
 
     protected override void OnMouseDoubleClick(MouseEventArgs e)
     {
-        if (e.Button == MouseButtons.Left && header.Contains(e.Location)) { Data.Collapsed = !Data.Collapsed; app.Save(); Render(); }
+        int item = TileAt(e.Location);
+        if (C.DoubleClickOpen && item >= 0 && item < Items.Count) { OpenItem(Items[item]); return; }
+        if (e.Button == MouseButtons.Left && header.Contains(e.Location) && e.X < winW - margin - 32 * u) { Data.Collapsed = !Data.Collapsed; app.Save(); Render(); }
         base.OnMouseDoubleClick(e);
     }
 
@@ -734,20 +815,27 @@ class GroupForm : Form
                     }
                     catch { }
             if (url == null && d.GetDataPresent(DataFormats.UnicodeText)) url = (d.GetData(DataFormats.UnicodeText) as string ?? "").Trim();
-            if (!string.IsNullOrEmpty(url) && (Target.IsLink(url) || Target.IsShell(url) || Directory.Exists(url) || File.Exists(url))) list.Add(url.Split('\n')[0].Trim());
+            if (!string.IsNullOrEmpty(url))
+            {
+                url = url.Split('\n')[0].Trim();
+                try { if (Target.IsLink(url) || Target.IsShell(url) || Path.IsPathRooted(url)) list.Add(url); } catch (ArgumentException) { }
+            }
         }
         return list;
     }
 
-    protected override void OnDragEnter(DragEventArgs e) { UpdateDrop(e); base.OnDragEnter(e); }
+    protected override void OnDragEnter(DragEventArgs e) { dragPaths = null; UpdateDrop(e); base.OnDragEnter(e); }
     protected override void OnDragOver(DragEventArgs e) { UpdateDrop(e); base.OnDragOver(e); }
     protected override void OnDragLeave(EventArgs e) { dropHot = false; dropAt = -1; Render(); base.OnDragLeave(e); }
 
     void UpdateDrop(DragEventArgs e)
     {
+        if (portal != null) { e.Effect = DragDropEffects.None; return; }
         bool ours = e.Data.GetDataPresent(ItemFormat);
-        bool ok = ours || Paths(e.Data).Count > 0;
-        e.Effect = !ok ? DragDropEffects.None : ours ? DragDropEffects.Move : (e.AllowedEffect & DragDropEffects.Link) != 0 ? DragDropEffects.Link : DragDropEffects.Copy;
+        if (dragPaths == null && !ours) dragPaths = Paths(e.Data);
+        bool ok = ours || dragPaths.Count > 0;
+        e.Effect = !ok ? DragDropEffects.None : ours ? ((e.KeyState & 8) != 0 ? DragDropEffects.Copy : DragDropEffects.Move) : (e.AllowedEffect & DragDropEffects.Link) != 0 ? DragDropEffects.Link : DragDropEffects.Copy;
+        AutoScrollDrop(PointToClient(new Point(e.X, e.Y)));
         int at = InsertAt(PointToClient(new Point(e.X, e.Y)));
         if (dropHot != ok || dropAt != at) { dropHot = ok; dropAt = at; Render(); }
     }
@@ -755,37 +843,34 @@ class GroupForm : Form
     // Where a drop at p goes: before the tile it's over (or after it, on its right half), else at the end.
     int InsertAt(Point p)
     {
-        if (Data.Collapsed) return Data.Items.Count;
-        for (int i = 0; i < tiles.Count && i < Data.Items.Count; i++)
-            if (tiles[i].Contains(p)) return p.X > tiles[i].X + tiles[i].Width / 2 ? i + 1 : i;
-        return Data.Items.Count;
+        if (Data.Collapsed) return Items.Count;
+        for (int i = 0; i < tiles.Count && i < tileIndices.Count; i++)
+            if (tiles[i].Contains(p)) return tileIndices[i] + (Data.ListView ? (p.Y > tiles[i].Y + tiles[i].Height / 2 ? 1 : 0) : (p.X > tiles[i].X + tiles[i].Width / 2 ? 1 : 0));
+        return Items.Count;
     }
 
     protected override void OnDragDrop(DragEventArgs e)
     {
+        if (portal != null) return;
         int at = InsertAt(PointToClient(new Point(e.X, e.Y)));
         dropHot = false; dropAt = -1;
         if (e.Data.GetDataPresent(ItemFormat))
         {
             var parts = (e.Data.GetData(ItemFormat) as string ?? "").Split('|');
-            int from;
             var src = app.Forms.FirstOrDefault(f => f.Data.Id == parts[0]);
-            if (src != null && parts.Length == 2 && int.TryParse(parts[1], out from) && from < src.Data.Items.Count)
+            if (src != null && src.portal == null && parts.Length == 2)
             {
-                var item = src.Data.Items[from];
-                src.Data.Items.RemoveAt(from);
-                if (src == this && from < at) at--;
-                Data.Items.Insert(Math.Min(at, Data.Items.Count), item);
+                MoveReferences(src, parts[1].Split(','), at, (e.KeyState & 8) != 0);
                 app.Save();
                 if (src != this) src.Render();
             }
         }
         else
         {
-            foreach (var p in Paths(e.Data))
+            foreach (var p in dragPaths ?? Paths(e.Data))
             {
-                if (Data.Items.Any(i => string.Equals(i.Path, p, StringComparison.OrdinalIgnoreCase))) continue;
-                Data.Items.Insert(Math.Min(at++, Data.Items.Count), new ItemData { Name = Target.NameFor(p), Path = p });
+                if (Items.Any(i => string.Equals(i.Path, p, StringComparison.OrdinalIgnoreCase))) continue;
+                Items.Insert(Math.Min(at++, Items.Count), new ItemData { Name = Target.NameFor(p), Path = p });
                 Target.Forget(p);
             }
             if (Data.Collapsed) Data.Collapsed = false;
@@ -797,38 +882,31 @@ class GroupForm : Form
 
     Point Snap(Point p)
     {
-        if (!C.Snap) return p;
-        var wa = Screen.FromPoint(Cursor.Position).WorkingArea;
+        if (!C.Snap || (ModifierKeys & Keys.Alt) != 0) { snapX = snapY = int.MinValue; return p; }
+        if (!snapWorkArea.Contains(Cursor.Position)) snapWorkArea = Screen.FromPoint(Cursor.Position).WorkingArea;
         int gap = (int)(12 * u), reach = (int)(18 * u);
-        int left = p.X + margin, top = p.Y + margin, right = p.X + winW - margin, bottom = p.Y + winH - margin;
-        if (Math.Abs(left - (wa.Left + gap)) < reach) p.X = wa.Left + gap - margin;
-        else if (Math.Abs(right - (wa.Right - gap)) < reach) p.X = wa.Right - gap - winW + margin;
-        if (Math.Abs(top - (wa.Top + gap)) < reach) p.Y = wa.Top + gap - margin;
-        else if (Math.Abs(bottom - (wa.Bottom - gap)) < reach) p.Y = wa.Bottom - gap - winH + margin;
-        // and to the other groups' edges, so they line up
-        foreach (var f in app.Forms)
+        var xs = new List<int> { snapWorkArea.Left + gap - margin, snapWorkArea.Right - gap - winW + margin };
+        var ys = new List<int> { snapWorkArea.Top + gap - margin, snapWorkArea.Bottom - gap - winH + margin };
+        foreach (var other in snapRects)
         {
-            if (f == this || !f.IsHandleCreated) continue;
-            var o = f.Placed;
-            int oL = o.Left + f.margin, oR = o.Right - f.margin, oT = o.Top + f.margin, oB = o.Bottom - f.margin;
-            if (Math.Abs(left - oL) < reach) p.X = oL - margin;
-            else if (Math.Abs(left - (oR + gap)) < reach) p.X = oR + gap - margin;
-            else if (Math.Abs(right - (oL - gap)) < reach) p.X = oL - gap - winW + margin;
-            if (Math.Abs(top - oT) < reach) p.Y = oT - margin;
-            else if (Math.Abs(top - (oB + gap)) < reach) p.Y = oB + gap - margin;
-            else if (Math.Abs(bottom - (oT - gap)) < reach) p.Y = oT - gap - winH + margin;
+            xs.Add(other.Left - margin); xs.Add(other.Right + gap - margin); xs.Add(other.Left - gap - winW + margin);
+            ys.Add(other.Top - margin); ys.Add(other.Bottom + gap - margin); ys.Add(other.Top - gap - winH + margin);
         }
+        p.X = DockLayout.NearestSnap(p.X, xs, reach, ref snapX); p.Y = DockLayout.NearestSnap(p.Y, ys, reach, ref snapY);
         return p;
     }
 
     void EnsurePosition()
     {
-        if (Data.X == int.MinValue || !Screen.AllScreens.Any(sc => sc.WorkingArea.IntersectsWith(new Rectangle(Data.X, Data.Y, winW, winH))))
+        renderX = Data.X; renderY = Data.Y;
+        var title = new Rectangle(Data.X == int.MinValue ? 0 : Data.X + margin, Data.Y == int.MinValue ? 0 : Data.Y + margin, Math.Max(1,winW-margin*2), Math.Max(1,(int)(HeaderH*u)));
+        if (Data.X == int.MinValue || !Screen.AllScreens.Any(sc => { var visible = Rectangle.Intersect(sc.WorkingArea,title); return visible.Width >= Math.Min(80,title.Width) && visible.Height >= Math.Min(20,title.Height); }))
         {
             var wa = Screen.PrimaryScreen.WorkingArea;
-            int gap = (int)(12 * u), n = app.C.List.IndexOf(Data);
-            Data.X = wa.Left + gap - margin + Math.Max(0, n) * (int)(24 * u);
-            Data.Y = wa.Top + gap - margin + Math.Max(0, n) * (int)(24 * u);
+            int gap = (int)(12 * u), n = app.C.List.IndexOf(app.Tabs(this)[0].Data);
+            renderX = wa.Left + gap - margin + (Math.Max(0, n) % 8) * (int)(24 * u);
+            renderY = wa.Top + gap - margin + (Math.Max(0, n) % 8) * (int)(24 * u);
+            if (Data.X == int.MinValue) { Data.X = renderX; Data.Y = renderY; }
         }
     }
 
@@ -836,38 +914,65 @@ class GroupForm : Form
     public void Render()
     {
         if (IsDisposed || !IsHandleCreated) return;
-        u = DeviceDpi / 96f * C.Scale / 100f;
+        bool shown = app.IsShown(this);
+        if (portal != null) portal.SetActive(shown && !Data.Collapsed);
+        if (!shown)
+        {
+            if (surfaceVisible) ShowWindow(Handle, 0); surfaceVisible = false;
+            surface.Dispose(); shadow.Dispose(); if (textLayer != null) { textLayer.Dispose(); textLayer = null; }
+            return;
+        }
+        app.RenderCount++;
+        u = EffectiveDpi / 96f * C.Scale / 100f;
         margin = (int)(14 * u);
         float pad = 12 * u;
         int cols = Math.Max(1, Data.Cols);
-        int rows = Math.Max(1, (int)Math.Ceiling(Data.Items.Count / (double)cols));
-        int cardW = (int)Math.Max(170 * u, cols * TileW + pad * 2);
-        int cardH = Data.Collapsed ? (int)(HeaderH * u + pad) : (int)(pad + HeaderH * u + (Data.Items.Count == 0 ? 64 * u : rows * TileH) + pad * 0.7f);
+        int rows = Math.Max(1, (int)Math.Ceiling(Items.Count / (double)cols));
+        int maxW = Math.Max(170, Screen.FromPoint(new Point(Data.X == int.MinValue ? 0 : Data.X, Data.Y == int.MinValue ? 0 : Data.Y)).WorkingArea.Width - margin * 2);
+        int cardW = Math.Min(maxW, (int)Math.Max(170 * u, Data.Width > 0 ? Data.Width * u : cols * TileW + pad * 2));
+        cols = Data.ListView ? 1 : Data.Width > 0 || cardW < cols * TileW + pad * 2 ? Math.Max(1, (int)((cardW - pad * 2) / TileW)) : cols;
+        layoutCols = cols;
+        rows = Math.Max(1, (int)Math.Ceiling(Items.Count / (double)cols));
+        int naturalH = (int)(pad + HeaderH * u + ExtraHeader + (Items.Count == 0 ? 64 * u : rows * TileH) + pad * 0.7f);
+        int maxH = Math.Max(100, Screen.FromPoint(new Point(Data.X == int.MinValue ? 0 : Data.X, Data.Y == int.MinValue ? 0 : Data.Y)).WorkingArea.Height - margin * 2 - (int)(24 * u));
+        int cardH = Data.Collapsed ? (int)(HeaderH * u + pad) : Math.Min(maxH, Math.Max((int)(140 * u), Data.Height > 0 ? (int)(Data.Height * u) : Math.Min((int)(520 * u), naturalH)));
         winW = cardW + margin * 2; winH = cardH + margin * 2;
 
         EnsurePosition();
         var bmp = surface.Canvas(winW, winH);
         using (var g = Graphics.FromImage(bmp)) PaintCard(g, cardW, cardH, pad, cols);
-        surface.Push(Handle, Data.X, Data.Y);
+        surface.Push(Handle, renderX, renderY);
         if (Program.ShotPath != null) return;
-        ShowWindow(Handle, 8);
-        if (layer == 0) SetWindowPos(Handle, new IntPtr(1), 0, 0, 0, 0, 0x1 | 0x2 | 0x10);
-        else if (layer == 2) SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x1 | 0x2 | 0x10);
+        int desiredLayer = app.Peeking ? 2 : layer;
+        if (!surfaceVisible || appliedLayer != desiredLayer)
+        {
+            ShowWindow(Handle, 8); surfaceVisible = true; appliedLayer = desiredLayer;
+            SetWindowPos(Handle, new IntPtr(desiredLayer == 2 ? -1 : desiredLayer == 0 ? 1 : -2), 0, 0, 0, 0, 0x1 | 0x2 | 0x10);
+        }
     }
 
     Bitmap textLayer;
     readonly ShadowCache shadow = new ShadowCache();
-    string Fam { get { return C.FontName != "" && Draw.HasFont(C.FontName) ? C.FontName : Theme.IsTerm(C.ThemeName) ? Theme.Mono : Draw.Family; } }
+    string familyKey, familyValue;
+    string Fam
+    {
+        get
+        {
+            string key = C.FontName + "|" + Theme.IsTerm(C.ThemeName);
+            if (familyKey != key) { familyKey = key; familyValue = C.FontName != "" && Draw.HasFont(C.FontName) ? C.FontName : Theme.IsTerm(C.ThemeName) ? Theme.Mono : Draw.Family; }
+            return familyValue;
+        }
+    }
     readonly Dictionary<string, Font> fonts = new Dictionary<string, Font>();
     string fontKey;
 
     Font F(float size, FontStyle style = FontStyle.Regular)
     {
-        var key = Fam + "|" + u + "|" + DeviceDpi;
+        var key = Fam + "|" + u + "|" + EffectiveDpi;
         if (key != fontKey) { DisposeFonts(); fontKey = key; }
         var k = size + "/" + (int)style;
         Font f;
-        if (!fonts.TryGetValue(k, out f)) fonts[k] = f = new Font(Fam, size * u / (DeviceDpi / 96f), style, GraphicsUnit.Point);
+        if (!fonts.TryGetValue(k, out f)) fonts[k] = f = new Font(Fam, size * u, style, GraphicsUnit.Point);
         return f;
     }
 
@@ -881,17 +986,19 @@ class GroupForm : Form
     void PaintCard(Graphics target, int cardW, int cardH, float pad, int cols)
     {
         var th = Theme.Get(C.ThemeName);
+        if (Data.AccentArgb != 0) th = new Theme(th.Name, th.Bg, th.Text, th.Sub, Color.FromArgb(Data.AccentArgb), th.Light);
         target.Clear(Color.Transparent);
         target.SmoothingMode = SmoothingMode.AntiAlias;
         target.PixelOffsetMode = PixelOffsetMode.HighQuality;
         var card = new RectangleF(margin, margin, cardW, cardH);
         float rad = 14 * u;
-        shadow.Paint(target, winW, winH, card + "|" + u + "|" + C.Opacity, sg =>
+        if (!C.Lightweight) shadow.Paint(target, winW, winH, card + "|" + u + "|" + C.Opacity, sg =>
         {
             for (int i = 1; i <= 6; i++)
                 using (var p = Draw.Round(RectangleF.Inflate(card, i * 1.6f * u, i * 1.6f * u), rad + i * 1.6f * u))
                 using (var b = new SolidBrush(Color.FromArgb((int)(14 * C.Opacity / 100f / i), 0, 0, 0))) sg.FillPath(b, p);
         });
+        else shadow.Dispose();
         int alpha = 255 * C.Opacity / 100;
         bool crisp = alpha >= 150;
         var g = target;
@@ -905,7 +1012,7 @@ class GroupForm : Form
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             g.TextContrast = 2;
         }
-        else g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        else { if (textLayer != null) { textLayer.Dispose(); textLayer = null; } g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit; }
         // the card must keep a little opacity everywhere, or clicks and drops on it would fall through to the desktop
         try { PaintContent(g, th, card, rad, crisp ? 255 : Math.Max(alpha, 2), pad, cols); }
         finally
@@ -926,7 +1033,7 @@ class GroupForm : Form
 
     void PaintContent(Graphics g, Theme th, RectangleF card, float rad, int alpha, float pad, int cols)
     {
-        tiles.Clear();
+        tiles.Clear(); tileIndices.Clear(); scrollTrack = RectangleF.Empty; scrollThumb = RectangleF.Empty;
         using (var p = Draw.Round(card, rad))
         {
             using (var b = new SolidBrush(Color.FromArgb(alpha, th.Bg))) g.FillPath(b, p);
@@ -938,7 +1045,7 @@ class GroupForm : Form
         using (var sub = new SolidBrush(th.Sub))
         {
             // title, with a small chevron that shows it rolls up, and the count
-            string count = Data.Items.Count.ToString();
+            string count = Items.Count.ToString();
             var cw = g.MeasureString(count, F(8.5f), 200, fmtR).Width;
             g.DrawString(count, F(8.5f), sub, new RectangleF(x + w - cw - 14 * u, y, cw, HeaderH * u), fmtR);
             float cx = x + w - 6 * u, cy = y + HeaderH * u / 2, s = 3.5f * u;
@@ -946,28 +1053,39 @@ class GroupForm : Form
                 if (Data.Collapsed) g.DrawLines(pen, new[] { new PointF(cx - s, cy - s / 2), new PointF(cx, cy + s / 2), new PointF(cx + s, cy - s / 2) });
                 else g.DrawLines(pen, new[] { new PointF(cx - s, cy + s / 2), new PointF(cx, cy - s / 2), new PointF(cx + s, cy + s / 2) });
             g.DrawString(Data.Name, F(10, FontStyle.Bold), text, new RectangleF(x + 2 * u, y, w - cw - 24 * u, HeaderH * u), fmtL);
+            if (Data.AccentArgb != 0) using (var accent = new SolidBrush(th.Accent)) g.FillRectangle(accent, x - 5 * u, y + 7 * u, 2 * u, 14 * u);
             if (Data.Collapsed) return;
             y += HeaderH * u;
+            y = PaintFeatureHeaders(g, th, x, y, w);
             using (var pen = new Pen(th.Line, 1)) g.DrawLine(pen, x, y, x + w, y);
 
-            if (Data.Items.Count == 0)
+            contentArea = new RectangleF(x, y, w, Math.Max(0, card.Bottom - pad * 0.7f - y));
+            scrollY = Math.Max(0, Math.Min(scrollY, DockLayout.MaxScroll(Items.Count, cols, TileH, contentArea.Height)));
+            if (Items.Count == 0)
             {
-                g.DrawString("Drop apps, files, folders or links here", F(8.5f), sub, new RectangleF(x, y, w, 64 * u), fmtC);
+                g.DrawString(portal != null ? (string.IsNullOrEmpty(portal.Status) ? "This folder is empty" : portal.Status) : "Drop apps, files, folders or links here", F(8.5f), sub, new RectangleF(x, y, w, 64 * u), fmtC);
+                PaintScrollAndGrip(g, th, card);
                 return;
             }
 
             int px = IconPx;
-            float tw = TileW, tH = TileH, gx = x + (w - cols * tw) / 2;
-            for (int i = 0; i < Data.Items.Count; i++)
+            float tw = Data.ListView ? w - 12 * u : TileW, tH = TileH, gx = Data.ListView ? x : x + (w - cols * tw) / 2;
+            var clip = g.Save(); g.SetClip(contentArea);
+            int first = Math.Max(0, (int)(scrollY / tH) * cols);
+            int last = Math.Min(Items.Count, (int)Math.Ceiling((scrollY + contentArea.Height) / tH) * cols);
+            tileIndices.Clear();
+            for (int i = first; i < last; i++)
             {
-                var it = Data.Items[i];
-                var r = new RectangleF(gx + (i % cols) * tw, y + (i / cols) * tH, tw, tH);
-                tiles.Add(r);
+                var it = Items[i];
+                var r = new RectangleF(gx + (i % cols) * tw, y + (i / cols) * tH - scrollY, tw, tH);
+                tiles.Add(r); tileIndices.Add(i);
                 var cell = RectangleF.Inflate(r, -3 * u, -3 * u);
-                if (i == hoverTile && !dropHot)
-                    using (var p = Draw.Round(cell, 8 * u)) using (var b = new SolidBrush(Color.FromArgb(th.Light ? 18 : 22, th.Text))) g.FillPath(b, p);
+                if (selected.Contains(it.Id) || i == hoverTile && !dropHot)
+                    using (var p = Draw.Round(cell, 8 * u)) using (var b = new SolidBrush(selected.Contains(it.Id) ? Color.FromArgb(65, th.Accent) : Color.FromArgb(th.Light ? 18 : 22, th.Text))) g.FillPath(b, p);
+                if (keyboardMode && focusedItem == i)
+                    using (var pen = new Pen(th.Accent, 1) { DashStyle = DashStyle.Dot }) g.DrawRectangle(pen, cell.X, cell.Y, cell.Width, cell.Height);
                 bool there = Target.Exists(it.Path);
-                var ir = new RectangleF(r.X + (tw - px) / 2, r.Y + 7 * u, px, px);
+                var ir = new RectangleF(Data.ListView ? r.X + 4 * u : r.X + (tw - px) / 2, r.Y + (Data.ListView ? 4 : 7) * u, px, px);
                 Bitmap icon = Target.IsLink(it.Path) ? null : ShellIcon.Get(it.Path, px);
                 if (icon != null)
                 {
@@ -978,21 +1096,23 @@ class GroupForm : Form
                     g.InterpolationMode = im;
                 }
                 else LetterTile(g, ir, it, th);
-                if (C.Labels)
+                if (ShowLabels || Data.ListView)
                 {
-                    var lr = new RectangleF(r.X + 1 * u, ir.Bottom + 5 * u, tw - 2 * u, 38 * u);
+                    var lr = Data.ListView ? new RectangleF(ir.Right + 8 * u, r.Y, Math.Max(1, tw - px - 18 * u), tH) : new RectangleF(r.X + 1 * u, ir.Bottom + 5 * u, tw - 2 * u, 38 * u);
                     using (var b = new SolidBrush(there ? th.Text : Color.FromArgb(150, th.Sub)))
-                        g.DrawString(it.Name, F(8.5f), b, lr, fmtLabel);
+                        g.DrawString(it.Name, F(8.5f), b, lr, Data.ListView ? fmtL : fmtLabel);
                 }
             }
             // where a drop will land
             if (dropHot && dropAt >= 0)
             {
                 int i = dropAt;
-                float lx = gx + (i % cols) * tw, ly = y + (i / cols) * tH;
+                float lx = gx + (i % cols) * tw, ly = y + (i / cols) * tH - scrollY;
                 using (var pen = new Pen(th.Accent, 2.5f * u) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                     g.DrawLine(pen, lx, ly + 6 * u, lx, ly + tH - 6 * u);
             }
+            g.Restore(clip);
+            PaintScrollAndGrip(g, th, card);
         }
     }
 
@@ -1011,9 +1131,8 @@ class GroupForm : Form
         var box = RectangleF.Inflate(r, -r.Width * 0.06f, -r.Width * 0.06f);
         using (var p = Draw.Round(box, box.Width * 0.26f)) using (var b = new SolidBrush(col)) g.FillPath(b, p);
         var letter = string.IsNullOrEmpty(it.Name) ? "?" : it.Name.Substring(0, 1).ToUpperInvariant();
-        using (var f = new Font(Fam, box.Height * 0.48f, FontStyle.Bold, GraphicsUnit.Pixel))
         using (var b = new SolidBrush(Color.White))
-            g.DrawString(letter, f, b, box, fmtC);
+            g.DrawString(letter, F(Math.Max(8, box.Height * 0.36f / u), FontStyle.Bold), b, box, fmtC);
         if (Target.IsLink(it.Path))
         {
             // a small link badge in the corner
@@ -1044,7 +1163,14 @@ class GroupForm : Form
     {
         if (itemMenu != null) itemMenu.Dispose();
         itemMenu = KinetikSuite.MenuFocus.Attach(new ContextMenuStrip());
-        var it = Data.Items[index];
+        var it = Items[index];
+        AddSelectionMenu(itemMenu.Items, it);
+        if (portal != null)
+        {
+            itemMenu.Items.Add(Item(it.IsDirectory ? "Browse folder" : "Open", false, () => OpenItem(it)));
+            itemMenu.Items.Add(Item("Show in File Explorer", false, () => Target.Reveal(it.Path)));
+            return itemMenu;
+        }
         itemMenu.Items.Add(Item("Open", false, () => Target.Open(it.Path)));
         if (!Target.IsLink(it.Path) && !Target.IsShell(it.Path)) itemMenu.Items.Add(Item("Show in File Explorer", false, () => Target.Reveal(it.Path)));
         itemMenu.Items.Add(Item("Rename…", false, () =>
@@ -1061,19 +1187,19 @@ class GroupForm : Form
             it.Path = n.Trim(); Target.Forget(it.Path);
             app.Save(); Render();
         }));
-        var others = app.Forms.Where(f => f != this).ToList();
+        var others = app.Forms.Where(f => f != this && f.portal == null).ToList();
         if (others.Count > 0)
         {
             var move = new ToolStripMenuItem("Move to");
             foreach (var f in others)
             {
                 var to = f;
-                move.DropDownItems.Add(Item(f.Data.Name, false, () => { Data.Items.Remove(it); to.Data.Items.Add(it); app.Save(); Render(); to.Render(); }));
+                move.DropDownItems.Add(Item(f.Data.Name, false, () => { Items.Remove(it); to.Items.Add(it); app.Save(); Render(); to.Render(); }));
             }
             itemMenu.Items.Add(move);
         }
         itemMenu.Items.Add(new ToolStripSeparator());
-        itemMenu.Items.Add(Item("Remove from this group", false, () => { Data.Items.Remove(it); app.Save(); Render(); }));
+        itemMenu.Items.Add(Item("Remove from this group", false, () => { Items.Remove(it); app.Save(); Render(); }));
         return itemMenu;
     }
 
@@ -1083,6 +1209,7 @@ class GroupForm : Form
         menu.Items.Clear();
         foreach (var it in old) it.Dispose();
         menu.Items.Add(new ToolStripMenuItem(Data.Name) { Enabled = false });
+        BuildGroupFeatureMenu(menu.Items);
         var add = new ToolStripMenuItem("Add");
         add.DropDownItems.Add(Item("Apps or files…", false, AddFiles));
         add.DropDownItems.Add(Item("A folder…", false, AddFolder));
@@ -1092,10 +1219,11 @@ class GroupForm : Form
             if (url == null) return;
             url = url.Trim();
             if (!Target.IsLink(url) && !Target.IsShell(url)) url = "https://" + url;
-            Data.Items.Add(new ItemData { Name = Target.NameFor(url), Path = url });
+            Items.Add(new ItemData { Name = Target.NameFor(url), Path = url });
             app.Save(); Render();
         }));
         menu.Items.Add(add);
+        add.Enabled = portal == null;
         menu.Items.Add(Item("Rename group…", false, () =>
         {
             var n = Prompt("Rename group", "Name of the group:", Data.Name);
@@ -1106,9 +1234,9 @@ class GroupForm : Form
         for (int i = 1; i <= 8; i++) { int v = i; cols.DropDownItems.Add(Item(v.ToString(), Data.Cols == v, () => { Data.Cols = v; app.Save(); Render(); })); }
         menu.Items.Add(cols);
         menu.Items.Add(Item(Data.Collapsed ? "Unroll" : "Roll up", false, () => { Data.Collapsed = !Data.Collapsed; app.Save(); Render(); }));
-        menu.Items.Add(Item("Sort by name", false, () => { Data.Items = Data.Items.OrderBy(i => i.Name, StringComparer.CurrentCultureIgnoreCase).ToList(); app.Save(); Render(); }));
+        menu.Items.Add(Item("Sort by name", false, () => { Items.Sort((a,b) => StringComparer.CurrentCultureIgnoreCase.Compare(a.Name,b.Name)); app.Save(); Render(); }));
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(Item("New group", false, () => app.NewGroup(new Point(Data.X + (int)(30 * u), Data.Y + (int)(30 * u)))));
+        menu.Items.Add(Item("New group", false, () => app.NewGroup(new Point(renderX + (int)(30 * u), renderY + (int)(30 * u)))));
         menu.Items.Add(Item("Delete this group…", false, () => app.DeleteGroup(this)));
         menu.Items.Add(new ToolStripSeparator());
         app.BuildMenu(menu.Items, this);
@@ -1120,7 +1248,7 @@ class GroupForm : Form
         {
             if (dlg.ShowDialog() != DialogResult.OK) return;
             foreach (var p in dlg.FileNames)
-                if (!Data.Items.Any(i => string.Equals(i.Path, p, StringComparison.OrdinalIgnoreCase))) Data.Items.Add(new ItemData { Name = Target.NameFor(p), Path = p });
+                if (!Items.Any(i => string.Equals(i.Path, p, StringComparison.OrdinalIgnoreCase))) Items.Add(new ItemData { Name = Target.NameFor(p), Path = p });
             app.Save(); Render();
         }
     }
@@ -1130,7 +1258,7 @@ class GroupForm : Form
         using (var dlg = new FolderBrowserDialog { Description = "Add a folder to " + Data.Name })
         {
             if (dlg.ShowDialog() != DialogResult.OK) return;
-            Data.Items.Add(new ItemData { Name = Target.NameFor(dlg.SelectedPath), Path = dlg.SelectedPath });
+            Items.Add(new ItemData { Name = Target.NameFor(dlg.SelectedPath), Path = dlg.SelectedPath });
             app.Save(); Render();
         }
     }
