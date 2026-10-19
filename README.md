@@ -46,7 +46,7 @@ The controlled 1,000-item rendering benchmark and its limits are documented in [
 - **Real icons** from Windows at any size (small, normal or large), with names under them or not. Web links get a coloured letter tile.
 - **Missing targets** (a removed app, an unplugged drive) are faded out rather than dropped
 - **Groups line up:** when you drag a group near another one or near a screen edge, it snaps into line with it
-- **Themes** in Kinetik's style, a choice of fonts, size and background opacity; on the desktop, normal windows or always on top; lock them all in place
+- **Themes** in the Kinetik apps' style, a choice of fonts, size and background opacity; on the desktop, normal windows or always on top; lock them all in place
 - **Settings backup** next to the exe, offered again on a fresh Windows
 
 ## Download and use
