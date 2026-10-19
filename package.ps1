@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][ValidatePattern('^Kinetik(?:Calendar|Clock|Dock|Feeds|Focus|Hub|Notes|Screen|Weather)?$')][string]$App)
+param([Parameter(Mandatory=$true)][ValidatePattern('^Kinetik(?:Stats|Calendar|Clock|Dock|Feeds|Focus|Hub|Notes|Screen|Weather)?$')][string]$App)
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -21,7 +21,7 @@ try {
         if (Test-Path -LiteralPath $notes) { Copy-Item -LiteralPath $notes -Destination $stage }
     }
     if (Test-Path -LiteralPath 'screenshots') { Copy-Item -LiteralPath 'screenshots' -Destination $stage -Recurse }
-    if ($App -in @('Kinetik', 'KinetikScreen')) {
+    if ($App -in @('Kinetik', 'KinetikStats', 'KinetikScreen')) {
         if (-not (Test-Path -LiteralPath 'lib\LibreHardwareMonitorLib.dll')) { throw 'Missing sensor library' }
         New-Item -ItemType Directory -Path (Join-Path $stage 'lib') | Out-Null
         Get-ChildItem -LiteralPath 'lib' -Filter '*.dll' | Copy-Item -Destination (Join-Path $stage 'lib')
