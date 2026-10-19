@@ -3,7 +3,7 @@
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 ![Windows 10 and 11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4)
 
-**Kinetik Dock** is a free, open-source app for Windows 11 and Windows 10 that keeps **groups of shortcuts on your desktop**: apps, files, folders and web links, each group in its own card. Think desktop fences, in the look of [Kinetik](https://github.com/WastedDesigner/Kinetik), the taskbar system monitor.
+**Kinetik Dock** is a free, open-source app for Windows 11 and Windows 10 that keeps **groups of shortcuts on your desktop**: apps, files, folders and web links, each group in its own card. Think desktop fences, in the look of [Kinetik Stats](https://github.com/WastedDesigner/Kinetik), the taskbar system monitor.
 
 It's a small portable app with no installer and no account.
 
@@ -12,6 +12,18 @@ It's a small portable app with no installer and no account.
 ![The same groups in the Light theme](screenshots/groups-light.png)
 
 > **About this project:** I made this for my own desktop and decided to share it in case anyone else finds it useful. If you run into a bug or have an idea for a feature, please open an issue.
+
+## What's new in 2.0
+
+Part of the Kinetik apps, with [Kinetik Stats](https://github.com/WastedDesigner/Kinetik) (the taskbar monitor, called just Kinetik until its v4.0), [Kinetik Hub](https://github.com/WastedDesigner/KinetikHub) and the other desktop widgets.
+
+- **A new settings window** (right-click → **Settings…**) replaces the old one: icon size, names, how shortcuts open, hotkeys, desktop organisation and diagnostics, then Look, Placement, General and About.
+- **App theme:** one theme and accent colour for every Kinetik app's windows and menus: Match Windows, Graphite, OLED black, Midnight, Nord, Mocha, Forest, Light or Paper, with a Sky, Violet, Mint, Amber, Rose or Coral accent or your Windows accent. Pick it in Settings → General, under **App theme** in the right-click menu, in Kinetik Hub or in Kinetik Stats, and every app follows.
+- **Widget themes:** new **OLED black** and **Mocha**, and **Match app theme**, which uses the app theme and accent colour.
+- **New icon** in the Kinetik apps' "Graphite glass" style.
+
+<img src="screenshots/settings.png" alt="The Dock page of Kinetik Dock's settings" width="600">
+<img src="screenshots/settings-general.png" alt="The General page" width="600">
 
 ## Features
 
