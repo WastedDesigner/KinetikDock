@@ -229,30 +229,41 @@ partial class DockContext
         history.DropDownItems.Add(Item("Collapse all", false, () => { foreach (var g in C.List.Where(g => g.Workspace == C.Workspace)) g.Collapsed = true; Save(); RenderAll(); }));
         history.DropDownItems.Add(Item("Expand all", false, () => { foreach (var g in C.List.Where(g => g.Workspace == C.Workspace)) g.Collapsed = false; Save(); RenderAll(); }));
         items.Add(history);
-        items.Add(Item("Settings and diagnostics…", false, ShowSettings));
         items.Add(new ToolStripSeparator());
     }
-    public void ShowSettings()
+    // Settings…: the Dock page, then the Look, Placement, General and About pages every Kinetik widget shares.
+    public void ShowSettings() { ShowSettings(null); }
+    public void ShowSettings(string page)
     {
-        if (settingsWindow != null && !settingsWindow.IsDisposed) { settingsWindow.Activate(); return; }
-        var f = new Form { Text = "Kinetik Dock settings", StartPosition = FormStartPosition.CenterScreen, ClientSize = new Size(520, 430), MinimumSize = new Size(450, 400), Font = new Font("Segoe UI", 10), BackColor = Color.FromArgb(27,31,44), ForeColor = Color.White };
-        settingsWindow = f;
-        var filter = new TextBox { Dock = DockStyle.Top, AccessibleName = "Search settings" };
-        var panel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Padding = new Padding(16) };
-        Action<string, bool, Action<bool>> check = (name, value, action) =>
-        { var cb = new CheckBox { Text = name, Checked = value, Width = 460, Height = 32 }; cb.CheckedChanged += (s,e) => { action(cb.Checked); Save(); RenderAll(); }; panel.Controls.Add(cb); };
-        check("Lightweight appearance (no shadows)", C.Lightweight, v => C.Lightweight = v);
-        check("Double-click to open shortcuts", C.DoubleClickOpen, v => C.DoubleClickOpen = v);
-        check("Global hotkeys (Ctrl+Alt+Space / Ctrl+Alt+F)", C.Hotkeys, v => { C.Hotkeys = v; if (hotkeys != null) hotkeys.Configure(); });
-        check("Lock all groups", C.Locked, v => C.Locked = v);
-        check("Snap groups (hold Alt to bypass)", C.Snap, v => C.Snap = v);
-        check("Show shortcut labels", C.Labels, v => C.Labels = v);
-        var help = new Label { Text = "Resize groups at their edges. Scroll with the wheel or scrollbar.\nFolder portals browse files without moving them.\nQuick access: press the hotkey again or Escape to dismiss.\nSearch covers saved shortcuts and loaded portal contents.", Width = 465, Height = 95 }; panel.Controls.Add(help);
-        var diagnostics = new Button { Text = "Show resource diagnostics", Width = 260, Height = 34 };
-        diagnostics.Click += (s,e) => { using (var p = Process.GetCurrentProcess()) MessageBox.Show("Uptime: " + lifetime.Elapsed.ToString(@"hh\:mm\:ss") + "\nPrivate memory: " + (p.PrivateMemorySize64 / 1048576) + " MB\nWorking set: " + (p.WorkingSet64 / 1048576) + " MB\nIcon cache: " + ShellIcon.Count + " entries / " + (ShellIcon.Bytes / 1024) + " KB\nGroup renders: " + RenderCount + "\nSettings saves: " + SaveCount, "Kinetik Dock diagnostics"); }; panel.Controls.Add(diagnostics);
-        filter.TextChanged += (s,e) => { foreach (Control control in panel.Controls) control.Visible = control.Text.IndexOf(filter.Text, StringComparison.CurrentCultureIgnoreCase) >= 0; };
-        f.Controls.Add(panel); f.Controls.Add(filter); f.Show();
+        var existing = settingsWindow as KinetikSuite.SettingsWindow;
+        if (existing != null && !existing.IsDisposed) { existing.Activate(); if (page != null) existing.ShowPage(page); return; }
+        var pages = new List<KinetikSuite.SettingsWindow.Page>
+        {
+            new KinetikSuite.SettingsWindow.Page { Name = "Dock", Glyph = "dock", Sub = "How the groups and their shortcuts look and open.", Build = b =>
+            {
+                b.Section("Shortcuts");
+                b.Choice("Icon size", null, new[] { "Small", "Normal", "Large" }, C.IconSize, v => { C.IconSize = v; Changed(); }, 140);
+                b.Switch("Show names", null, C.Labels, v => { C.Labels = v; Changed(); });
+                b.Switch("Double-click to open", "Otherwise a single click opens a shortcut", C.DoubleClickOpen, v => { C.DoubleClickOpen = v; Save(); RenderAll(); });
+                b.Switch("Lightweight appearance", "No shadows, for slower PCs", C.Lightweight, v => { C.Lightweight = v; Save(); RenderAll(); });
+                b.Section("Keyboard");
+                b.Switch("Global hotkeys", "Ctrl+Alt+Space for quick access, Ctrl+Alt+F to search", C.Hotkeys, v => { C.Hotkeys = v; if (hotkeys != null) hotkeys.Configure(); Save(); });
+                b.Section("Tools");
+                b.Buttons("Desktop references", "Sort desktop files into groups by rules", b.Button("Organise…", ShowOrganisation));
+                b.Buttons("Diagnostics", "Memory, icon cache and render counts", b.Button("Show", () =>
+                {
+                    using (var p = Process.GetCurrentProcess())
+                        MessageBox.Show("Uptime: " + lifetime.Elapsed.ToString(@"hh\:mm\:ss") + "\nPrivate memory: " + (p.PrivateMemorySize64 / 1048576) + " MB\nWorking set: " + (p.WorkingSet64 / 1048576) + " MB\nIcon cache: " + ShellIcon.Count + " entries / " + (ShellIcon.Bytes / 1024) + " KB\nGroup renders: " + RenderCount + "\nSettings saves: " + SaveCount, "Kinetik Dock diagnostics");
+                }));
+                b.Hint("Resize groups at their edges and scroll them with the wheel. Folder portals browse files without moving them. Press the hotkey again, or Escape, to dismiss quick access.", 3);
+            } },
+        };
+        pages.AddRange(Common().ForSettings().Pages());
+        var w = new KinetikSuite.SettingsWindow("Kinetik Dock", Program.Version, pages, page);
+        settingsWindow = w;
+        w.Show();
     }
+
     void CloseFeatures()
     {
         if (closing) return; closing = true;

@@ -55,6 +55,8 @@ static class Program
             Backup.KeyName = "KinetikDock"; Backup.AppTitle = "Kinetik Dock";
             if (!Demo) Backup.OfferRestore();
             var app = new DockContext();
+            // --settings opens the settings window once the app has started.
+            if (args.Contains("--settings")) { EventHandler once = null; once = (s2, e2) => { Application.Idle -= once; app.ShowSettings(); }; Application.Idle += once; }
             using (new KinetikSuite.Shutdown("KinetikDock" + (Demo ? "Demo" : ""), app.Quit))
                 Application.Run(app);
         }
@@ -555,6 +557,7 @@ partial class DockContext : ApplicationContext
         return new CommonMenu
         {
             Title = "Kinetik Dock", Version = Program.Version,
+            OpenSettings = () => ShowSettings(),
             OpenTheme = () =>
             {
                 if (picker != null && !picker.IsDisposed) { picker.Activate(); return; }
@@ -1847,6 +1850,21 @@ class CommonMenu
         items.Add(new ToolStripSeparator());
         items.Add(new ToolStripMenuItem(Title + " " + Version) { Enabled = false });
         if (Exit != null) items.Add(Item("Exit", false, Exit));
+    }
+
+    // The same options as the shared pages of a settings window (Look, Placement, General, About).
+    public KinetikSuite.SettingsWindow.Common ForSettings()
+    {
+        return new KinetikSuite.SettingsWindow.Common
+        {
+            Title = Title, Version = Version, OpenTheme = OpenTheme,
+            Scale = Scale, SetScale = SetScale, Scales = Scales, Widths = Widths, CardWidth = CardWidth, SetCardWidth = SetCardWidth,
+            FontName = FontName, SetFontName = SetFontName, Fonts = Fonts.Where(HasFont).ToArray(),
+            Opacity = Opacity, SetOpacity = SetOpacity, Opacities = Opacities,
+            Layer = Layer, SetLayer = SetLayer, Locked = Locked, SetLocked = SetLocked, LockText = LockText,
+            ClickThrough = ClickThrough, SetClickThrough = SetClickThrough, Snap = Snap, SetSnap = SetSnap,
+            RunAtStartup = RunAtStartup, SetRunAtStartup = SetRunAtStartup, BackUp = BackUp, Restore = Restore, LastBackup = LastBackup,
+        };
     }
 
     public void AddAll(ToolStripItemCollection items) { AddLook(items); AddEnd(items); }
